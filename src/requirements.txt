@@ -1,0 +1,5 @@
+# Native PostgreSQL driver (no RDS Data API) for arm64 Graviton
+psycopg[binary]==3.2.3
+typing_extensions>=4.6.0
+# Public CA bundle for TLS verify-full
+certifi>=2024.0.0
