@@ -817,6 +817,48 @@ pub fn handle_request_with_host(
     let mut tracker = LatencyTracker::new();
     let method_upper = method.to_uppercase();
 
+    // 0. CORS preflight OPTIONS and Alibaba Cloud Quick BI support
+    if method_upper == "OPTIONS" {
+        return HttpResponse {
+            status_code: 204,
+            headers: vec![
+                ("Access-Control-Allow-Origin".to_string(), "*".to_string()),
+                ("Access-Control-Allow-Methods".to_string(), "GET, POST, OPTIONS, HEAD".to_string()),
+                ("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With, Accept, Origin".to_string()),
+                ("Access-Control-Allow-Credentials".to_string(), "true".to_string()),
+                ("Access-Control-Max-Age".to_string(), "86400".to_string()),
+            ],
+            body: String::new(),
+        };
+    }
+
+    if path == "/ai/resource" || path == "/api/resource" {
+        let summary = store.query_cost_summary(30);
+        let records = serde_json::to_value(&summary.top_services).unwrap_or(serde_json::json!([]));
+        let total = summary.top_services.len();
+        let payload = serde_json::json!({
+            "code": 200,
+            "message": "success",
+            "data": {
+                "total": total,
+                "pageSize": total,
+                "pageNum": 1,
+                "records": records
+            }
+        });
+        return HttpResponse {
+            status_code: 200,
+            headers: vec![
+                ("Content-Type".to_string(), "application/json; charset=utf-8".to_string()),
+                ("Access-Control-Allow-Origin".to_string(), "*".to_string()),
+                ("Access-Control-Allow-Methods".to_string(), "GET, POST, OPTIONS, HEAD".to_string()),
+                ("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With, Accept, Origin".to_string()),
+                ("Cache-Control".to_string(), "no-store".to_string()),
+            ],
+            body: serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        };
+    }
+
     // 1. /healthz endpoint - runtime integrity check
     if path == "/healthz" {
         let source_info = crate::store::get_backing_source_info();
