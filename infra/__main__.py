@@ -315,7 +315,7 @@ web_fn_url = aws.lambda_.FunctionUrl(
     authorization_type="NONE",
     cors=aws.lambda_.FunctionUrlCorsArgs(
         allow_origins=["*"],
-        allow_methods=["GET", "POST", "OPTIONS", "HEAD"],
+        allow_methods=["*"],
         allow_headers=["*"],
     ),
 )
@@ -398,7 +398,7 @@ web_rust_fn_url = aws.lambda_.FunctionUrl(
     authorization_type="NONE",
     cors=aws.lambda_.FunctionUrlCorsArgs(
         allow_origins=["*"],
-        allow_methods=["GET", "POST", "OPTIONS", "HEAD"],
+        allow_methods=["*"],
         allow_headers=["*"],
     ),
 )

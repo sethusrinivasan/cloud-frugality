@@ -33,6 +33,9 @@ fi
 echo "🐍 Preparing Python Lambda deployment package..."
 mkdir -p "${PROJECT_ROOT}/build/lambda_python"
 cp "${PROJECT_ROOT}/src/python/"*.py "${PROJECT_ROOT}/build/lambda_python/"
+if [[ -f "${PROJECT_ROOT}/src/python/real_aws_usage.json" ]]; then
+  cp "${PROJECT_ROOT}/src/python/real_aws_usage.json" "${PROJECT_ROOT}/build/lambda_python/"
+fi
 if [[ -f "${PROJECT_ROOT}/src/schema.sql" ]]; then
   cp "${PROJECT_ROOT}/src/schema.sql" "${PROJECT_ROOT}/build/lambda_python/"
 fi
