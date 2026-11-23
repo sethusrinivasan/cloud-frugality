@@ -40,6 +40,9 @@ RUST_PORT = int(os.environ.get("RUST_PORT", "8091"))
 
 
 class PythonLambdaProxyHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self._handle_request("OPTIONS")
+
     def do_HEAD(self):
         self._handle_request("HEAD")
 

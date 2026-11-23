@@ -872,6 +872,47 @@ def lambda_handler(event: dict, context: Any) -> dict:
     # Seed sample data if empty
     _seed_sample_data_if_empty(store)
 
+    # 0. CORS Preflight & Alibaba Cloud Quick BI Support
+    cors_origin = (event.get("headers") or {}).get("origin") or (event.get("headers") or {}).get("Origin") or "*"
+    if method == "OPTIONS":
+        return {
+            "statusCode": 204,
+            "headers": {
+                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Max-Age": "86400",
+            },
+            "body": "",
+        }
+
+    # Alibaba Cloud Quick BI Data API endpoint
+    if raw_path in ("/ai/resource", "/api/resource"):
+        data = store.query_cost_summary(window_days=COST_WINDOW_DAYS)
+        records = data.get("services") or data.get("daily") or []
+        res_payload = {
+            "code": 200,
+            "message": "success",
+            "data": {
+                "total": len(records),
+                "pageSize": len(records),
+                "pageNum": 1,
+                "records": records,
+            }
+        }
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
+                "Cache-Control": "no-store",
+            },
+            "body": json.dumps(res_payload, indent=2),
+        }
+
     # 1. Health check & process identity
     if raw_path == "/healthz":
         source_info = store.get_backing_source_info()
