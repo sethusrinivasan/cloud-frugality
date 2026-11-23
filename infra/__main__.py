@@ -292,12 +292,13 @@ web_fn = aws.lambda_.Function(
     handler="web.lambda_handler",
     role=web_role.arn,
     code=lambda_code,
-    timeout=30,
-    memory_size=512,
+    timeout=60,
+    memory_size=1024,
     environment=aws.lambda_.FunctionEnvironmentArgs(
         variables={
             "FRUGALITY_S3_BUCKET": frugality_bucket.id,
             "FRUGALITY_S3_PREFIX": "frugality/python",
+            "FRUGALITY_PARQUET_KEY": "frugality/datasets/aws_1m_usage.parquet",
             "AWS_REGION_NAME": CURRENT_REGION,
             "COST_WINDOW_DAYS": "30",
             "LOG_LEVEL": "INFO",

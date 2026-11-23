@@ -902,6 +902,75 @@ def lambda_handler(event: dict, context: Any) -> dict:
             "body": "",
         }
 
+    # Parse request body if present (for POST filter / DSL queries)
+    body_dict = {}
+    raw_body = event.get("body")
+    if raw_body:
+        if event.get("isBase64Encoded"):
+            import base64
+            try:
+                raw_body = base64.b64decode(raw_body).decode("utf-8")
+            except Exception:
+                raw_body = ""
+        try:
+            body_dict = json.loads(raw_body)
+        except Exception:
+            pass
+
+    # Bulk Export Endpoints for AI Data Analyst full dataset analysis
+    if raw_path in ("/ai/resource/export", "/api/resource/export"):
+        try:
+            from duckdb_s3 import get_export_urls
+            export_urls = get_export_urls()
+        except Exception as exc:
+            export_urls = {"error": str(exc)}
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
+            },
+            "body": json.dumps({"code": 200, "message": "success", "data": export_urls}, indent=2),
+        }
+
+    if raw_path in ("/ai/resource/export/csv", "/api/resource/export/csv"):
+        from duckdb_s3 import get_export_urls
+        urls = get_export_urls()
+        return {
+            "statusCode": 302,
+            "headers": {
+                "Location": urls["csv_gz_1m_url"],
+                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+            },
+            "body": "",
+        }
+
+    if raw_path in ("/ai/resource/export/parquet", "/api/resource/export/parquet"):
+        from duckdb_s3 import get_export_urls
+        urls = get_export_urls()
+        return {
+            "statusCode": 302,
+            "headers": {
+                "Location": urls["parquet_1m_url"],
+                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+            },
+            "body": "",
+        }
+
+    if raw_path in ("/ai/resource/export/sample", "/api/resource/export/sample"):
+        from duckdb_s3 import get_export_urls
+        urls = get_export_urls()
+        return {
+            "statusCode": 302,
+            "headers": {
+                "Location": urls["sample_csv_10k_url"],
+                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+            },
+            "body": "",
+        }
+
     # Alibaba Cloud Quick BI Data API endpoint
     if raw_path in ("/ai/resource", "/api/resource"):
         data = store.query_cost_summary(window_days=COST_WINDOW_DAYS)
@@ -933,26 +1002,28 @@ def lambda_handler(event: dict, context: Any) -> dict:
             "body": json.dumps(res_payload, indent=2),
         }
 
-    # Paginated REST API endpoint serving 1M+ records per specification
+    # Paginated REST API endpoint serving 1M+ records per specification with Date Filtering
     if raw_path in ("/ai/resource/paginated", "/api/resource/paginated"):
         try:
-            page_val = int(query_params.get("page", 1))
-        except (ValueError, TypeError):
-            page_val = 1
-
-        try:
-            raw_page_size = query_params.get("pageSize")
-            page_size_val = int(raw_page_size) if raw_page_size is not None else 1000
-        except (ValueError, TypeError):
-            page_size_val = 1000
-
-        sort_by = query_params.get("sort_by", "date")
-        sort_order = query_params.get("sort_order", "desc")
-
-        try:
-            from paginator import get_paginated_records
+            from duckdb_s3 import extract_request_filters, query_paginated_from_s3
         except ImportError:
-            from .paginator import get_paginated_records
+            try:
+                from .duckdb_s3 import extract_request_filters, query_paginated_from_s3
+            except ImportError:
+                from paginator import get_paginated_records as query_paginated_from_s3
+                def extract_request_filters(qp, bd):
+                    return int(qp.get("page", 1)), int(qp.get("pageSize", 1000)), qp.get("sort_by", "date"), qp.get("sort_order", "desc"), None, None, None, None
+
+        (
+            page_val,
+            page_size_val,
+            sort_by,
+            sort_order,
+            start_date,
+            end_date,
+            region_filter,
+            workload_filter,
+        ) = extract_request_filters(query_params, body_dict)
 
         req_headers = event.get("headers") or {}
         accept_encoding = (
@@ -969,11 +1040,15 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if "gzip" not in accept_encoding and page_size_val > 5000:
             effective_req_page_size = 5000
 
-        paginated_data, err_msg = get_paginated_records(
+        paginated_data, err_msg = query_paginated_from_s3(
             page=page_val,
             page_size=effective_req_page_size,
             sort_by=sort_by,
             sort_order=sort_order,
+            start_date=start_date,
+            end_date=end_date,
+            region_filter=region_filter,
+            workload_filter=workload_filter,
         )
 
         if err_msg:
@@ -987,6 +1062,14 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 },
                 "body": json.dumps({"code": 400, "message": err_msg}),
             }
+
+        # Add bulk download links in metadata for AI data analyst agents
+        if paginated_data and isinstance(paginated_data, dict):
+            try:
+                from duckdb_s3 import get_export_urls
+                paginated_data["export_urls"] = get_export_urls()
+            except Exception:
+                pass
 
         res_payload = {
             "code": 200,

@@ -49,6 +49,13 @@ if [[ ! -d "${PROJECT_ROOT}/build/lambda_python/duckdb" ]]; then
   "${PYTHON_LAMBDA_BIN}" -m pip install duckdb -t "${PROJECT_ROOT}/build/lambda_python" --quiet
 fi
 
+# Bundle DuckDB httpfs extension for zero-download native S3 Parquet scanning
+mkdir -p "${PROJECT_ROOT}/build/lambda_python/duckdb_extensions"
+if [[ -f "${HOME}/.duckdb/extensions/v2.0.1/linux_amd64/httpfs.duckdb_extension" ]]; then
+  echo "📦 Bundling DuckDB httpfs extension for AWS Lambda S3 scanning..."
+  cp "${HOME}/.duckdb/extensions/v2.0.1/linux_amd64/httpfs.duckdb_extension" "${PROJECT_ROOT}/build/lambda_python/duckdb_extensions/"
+fi
+
 cd "${PROJECT_ROOT}/infra"
 
 STACK_NAME="${PULUMI_STACK:-dev}"
