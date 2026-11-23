@@ -954,9 +954,24 @@ def lambda_handler(event: dict, context: Any) -> dict:
         except ImportError:
             from .paginator import get_paginated_records
 
+        req_headers = event.get("headers") or {}
+        accept_encoding = (
+            req_headers.get("accept-encoding")
+            or req_headers.get("Accept-Encoding")
+            or ""
+        ).lower()
+
+        # AWS Lambda sync response payload limit is 6 MB (6,291,456 bytes).
+        # Uncompressed 10,000 JSON records is ~8.5 MB, which exceeds AWS Lambda's limit without gzip.
+        # If client does not accept gzip and requested pageSize > 5000, cap at 5000 to safely fit in 4.2 MB.
+        # When gzip is supported (or pageSize <= 5000), full requested pageSize (up to 10000) is served.
+        effective_req_page_size = page_size_val
+        if "gzip" not in accept_encoding and page_size_val > 5000:
+            effective_req_page_size = 5000
+
         paginated_data, err_msg = get_paginated_records(
             page=page_val,
-            page_size=page_size_val,
+            page_size=effective_req_page_size,
             sort_by=sort_by,
             sort_order=sort_order,
         )
@@ -973,20 +988,44 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 "body": json.dumps({"code": 400, "message": err_msg}),
             }
 
+        res_payload = {
+            "code": 200,
+            "message": "success",
+            "data": paginated_data,
+        }
+
+        # Compact JSON formatting for large datasets to maximize throughput and stay within memory limits
+        use_indent = len(paginated_data.get("records", [])) <= 50
+        if use_indent:
+            json_str = json.dumps(res_payload, indent=2)
+        else:
+            json_str = json.dumps(res_payload, separators=(",", ":"))
+
+        resp_headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
+            "Cache-Control": "no-store",
+        }
+
+        # Enable gzip compression if client supports it
+        if "gzip" in accept_encoding and len(json_str) > 1024:
+            import gzip
+            import base64
+            gzipped = gzip.compress(json_str.encode("utf-8"))
+            resp_headers["Content-Encoding"] = "gzip"
+            return {
+                "statusCode": 200,
+                "headers": resp_headers,
+                "isBase64Encoded": True,
+                "body": base64.b64encode(gzipped).decode("ascii"),
+            }
+
         return {
             "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json; charset=utf-8",
-                "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
-                "Cache-Control": "no-store",
-            },
-            "body": json.dumps({
-                "code": 200,
-                "message": "success",
-                "data": paginated_data,
-            }, indent=2),
+            "headers": resp_headers,
+            "body": json_str,
         }
 
     # 1. Health check & process identity
