@@ -1,0 +1,19 @@
+[package]
+name = "cloud-frugality"
+version = "0.1.0"
+edition = "2021"
+description = "Dedicated serverless AWS cost, promotional credit runway, and active resource tracking microservice in Rust"
+authors = ["Sethu Srinivasan <sethusrinivasan@gmail.com>"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[[bin]]
+name = "cloud-frugality"
+path = "src/main.rs"
+
+[lib]
+name = "cloud_frugality"
+path = "src/lib.rs"

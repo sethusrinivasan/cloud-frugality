@@ -42,3 +42,11 @@ package-lock.json
 .env
 .env.*
 !.env.example
+
+# Local servers & runtime artifacts
+*.log
+.server.pid
+server.log
+target/
+bootstrap
+.pytest_cache/

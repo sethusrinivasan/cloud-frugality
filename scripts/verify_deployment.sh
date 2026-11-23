@@ -4,27 +4,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
+PYTEST_BIN="${PROJECT_ROOT}/.venv/bin/pytest"
 
-echo "=== Running Offline Unit Tests ==="
-${PYTHON_BIN} -c "
-import tests.test_billing as tb
-tb.test_credit_expiry_binds_when_burn_is_low()
-tb.test_credit_exhaustion_binds_when_burn_is_high()
-tb.test_zero_burn_rate()
-tb.test_missing_credits_data()
-print('test_billing PASS')
+export PATH="${HOME}/.local/bin:${HOME}/.pulumi/bin:${PATH}"
 
-import tests.test_web as tw
-tw.test_latency_tracker()
-tw.test_render_html_contains_frugality_branding()
-tw.test_healthz_endpoint()
-print('test_web PASS')
+echo "=== Running Offline Unit & Integration Tests ==="
+${PYTEST_BIN} \
+  "${PROJECT_ROOT}/tests/test_billing.py" \
+  "${PROJECT_ROOT}/tests/test_store.py" \
+  "${PROJECT_ROOT}/tests/test_web.py" \
+  "${PROJECT_ROOT}/tests/test_resources.py" \
+  -v
 
-import tests.test_resources as tr
-tr.test_parse_arn()
-tr.test_sweep_resources()
-print('test_resources PASS')
-"
+echo "=== Running Deployment & Microservice Integrity Audit ==="
+if [ -n "${COST_WEB_URL:-}" ] || pulumi stack output web_url --cwd "${PROJECT_ROOT}/infra" &>/dev/null; then
+  ${PYTHON_BIN} "${PROJECT_ROOT}/tests/test_live_audit.py"
+else
+  echo "⚡ No remote live URL or Pulumi stack detected. Running AWS Emulator validation instead..."
+  ${PYTEST_BIN} "${PROJECT_ROOT}/tests/test_aws_emulator.py" -v
+fi
 
-echo "=== Running Live AWS & Microservice Integrity Audit ==="
-${PYTHON_BIN} "${PROJECT_ROOT}/tests/test_live_audit.py"
+echo "=== All Deployment Verification Audits Passed! ==="

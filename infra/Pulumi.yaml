@@ -1,0 +1,6 @@
+name: cloud-frugality
+runtime:
+  name: python
+  options:
+    virtualenv: ../.venv
+description: Cloud Frugality serverless AWS cost and runway microservice with S3 + DuckDB backing store
