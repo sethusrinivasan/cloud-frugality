@@ -24,4 +24,8 @@ pub use store::{
     get_service_acronym, AppTagBreakdown, BudgetInfo, CostSummary, DailyCostPayload, DailyRecord, FrugalityStore,
     Settings, SubCostItem, Top5ServiceItem, TopServiceSummary,
 };
-pub use web::{get_process_comm, get_service_icon_svg, handle_request, render_dashboard_html, render_settings_html, render_sparkline, HttpResponse};
+pub use web::{
+    get_engine_switch_urls, get_process_comm, get_service_icon_svg, handle_request,
+    handle_request_with_host, render_dashboard_html, render_settings_html, render_sparkline,
+    HttpResponse,
+};

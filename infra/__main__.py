@@ -281,6 +281,9 @@ web_log_policy = aws.iam.RolePolicy(
     ),
 )
 
+PYTHON_ENDPOINT_URL = "https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/"
+RUST_ENDPOINT_URL = "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/"
+
 web_fn = aws.lambda_.Function(
     "web-function",
     name="cloud-frugality-web",
@@ -298,6 +301,8 @@ web_fn = aws.lambda_.Function(
             "AWS_REGION_NAME": CURRENT_REGION,
             "COST_WINDOW_DAYS": "30",
             "LOG_LEVEL": "INFO",
+            "PYTHON_WEB_URL": PYTHON_ENDPOINT_URL,
+            "RUST_WEB_URL": RUST_ENDPOINT_URL,
         }
     ),
     tags=COMMON_TAGS,
@@ -380,6 +385,8 @@ web_rust_fn = aws.lambda_.Function(
             "AWS_REGION_NAME": CURRENT_REGION,
             "COST_WINDOW_DAYS": "30",
             "LOG_LEVEL": "INFO",
+            "PYTHON_WEB_URL": PYTHON_ENDPOINT_URL,
+            "RUST_WEB_URL": RUST_ENDPOINT_URL,
         }
     ),
     tags=rust_common_tags,

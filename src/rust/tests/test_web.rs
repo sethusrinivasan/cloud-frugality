@@ -1,7 +1,9 @@
 use cloud_frugality::collector::seed_sample_data_if_empty;
 use cloud_frugality::metrics::LatencyTracker;
 use cloud_frugality::store::FrugalityStore;
-use cloud_frugality::web::{handle_request, render_sparkline};
+use cloud_frugality::web::{
+    get_engine_switch_urls, handle_request, handle_request_with_host, render_sparkline,
+};
 
 #[test]
 fn test_latency_tracker() {
@@ -56,5 +58,27 @@ fn test_web_dashboard_and_healthz() {
     assert!(api_resp.body.contains("region_breakdown"));
     assert!(api_resp.body.contains("latency_breakdown"));
 
+    // 4. Remote request resolution: no localhost leakage
+    let remote_host = "2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws";
+    let remote_resp = handle_request_with_host("GET", "/", "", "", remote_host, &store);
+    assert_eq!(remote_resp.status_code, 200);
+    assert!(!remote_resp.body.contains("http://localhost"));
+    assert!(!remote_resp.body.contains("127.0.0.1"));
+
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_engine_switch_url_resolution() {
+    // 1. Local resolution
+    let (py_local, rust_local) = get_engine_switch_urls("localhost:8091");
+    assert_eq!(py_local, "http://localhost:8090/");
+    assert_eq!(rust_local, "http://localhost:8091/");
+
+    // 2. Remote resolution without env vars
+    let (py_rem, rust_rem) = get_engine_switch_urls("2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws");
+    assert_eq!(py_rem, "/?engine=python");
+    assert_eq!(rust_rem, "/?engine=rust");
+    assert!(!py_rem.contains("localhost"));
+    assert!(!rust_rem.contains("localhost"));
 }

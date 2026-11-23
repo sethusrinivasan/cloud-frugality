@@ -113,11 +113,54 @@ pub fn get_service_icon_svg(service_name: &str, acronym: &str) -> &'static str {
     }
 }
 
+/// Resolves engine toggle URLs for Python and Rust dashboards.
+///
+/// Under AWS Lambda (or remote reverse proxies), URLs resolve to configured
+/// Function URLs (via `PYTHON_WEB_URL` and `RUST_WEB_URL`) or relative path queries,
+/// guaranteeing zero localhost/127.0.0.1 leakage.
+/// In local development (outside AWS Lambda with localhost host), defaults to
+/// dedicated ports (:8090 and :8091).
+///
+/// Formal safety verified via TLA+ specification in `formal_spec/EngineSwitch.tla`.
+pub fn get_engine_switch_urls(current_host: &str) -> (String, String) {
+    let is_aws = std::env::var("AWS_LAMBDA_FUNCTION_NAME").is_ok()
+        || std::env::var("AWS_EXECUTION_ENV").is_ok()
+        || std::env::var("LAMBDA_TASK_ROOT").is_ok();
+
+    let python_env = std::env::var("PYTHON_WEB_URL").ok().filter(|s| !s.trim().is_empty());
+    let rust_env = std::env::var("RUST_WEB_URL").ok().filter(|s| !s.trim().is_empty());
+
+    let clean_host = current_host.split(':').next().unwrap_or("").trim().to_lowercase();
+    let is_localhost = clean_host == "localhost" || clean_host == "127.0.0.1" || clean_host.is_empty();
+
+    // Local development: strictly when running locally outside AWS Lambda
+    if is_localhost && !is_aws {
+        let py_url = python_env.unwrap_or_else(|| "http://localhost:8090/".to_string());
+        let rust_url = rust_env.unwrap_or_else(|| "http://localhost:8091/".to_string());
+        return (py_url, rust_url);
+    }
+
+    // Remote / AWS Deployment:
+    let mut resolved_py = python_env.unwrap_or_else(|| "/?engine=python".to_string());
+    let mut resolved_rust = rust_env.unwrap_or_else(|| "/?engine=rust".to_string());
+
+    // Invariant: Never leak localhost to remote browsers
+    if resolved_py.contains("localhost") || resolved_py.contains("127.0.0.1") {
+        resolved_py = "/?engine=python".to_string();
+    }
+    if resolved_rust.contains("localhost") || resolved_rust.contains("127.0.0.1") {
+        resolved_rust = "/?engine=rust".to_string();
+    }
+
+    (resolved_py, resolved_rust)
+}
+
 /// Renders the complete HTML dashboard string with interactive engine switcher.
-pub fn render_dashboard_html(data: &CostSummary, tracker: &LatencyTracker) -> String {
+pub fn render_dashboard_html(data: &CostSummary, tracker: &LatencyTracker, host: &str) -> String {
     let summary = tracker.summary();
     let daily_baseline = data.daily_baseline_usd;
     let budget = &data.budget;
+    let (python_url, rust_url) = get_engine_switch_urls(host);
 
     // Overall 30-day gross sparkline
     let mut gross_chron: Vec<f64> = data.daily.iter().map(|d| d.gross_usd).collect();
@@ -328,11 +371,11 @@ pub fn render_dashboard_html(data: &CostSummary, tracker: &LatencyTracker) -> St
     <!-- Real Engine Switcher & Backing Source Indicators -->
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <div class="engine-switcher">
-        <a href="http://localhost:8090/" class="engine-btn" title="Switch to Python Server on Port 8090">
-          <span>🐍 Python (:8090)</span>
+        <a href="{python_url}" class="engine-btn" title="Switch to Python Server">
+          <span>🐍 Python</span>
         </a>
-        <a href="http://localhost:8091/" class="engine-btn active" title="Currently Running on Rust Server (Port 8091)">
-          <span>🦀 Rust (:8091)</span>
+        <a href="{rust_url}" class="engine-btn active" title="Currently Running on Rust Server">
+          <span>🦀 Rust</span>
         </a>
       </div>
 
@@ -751,12 +794,24 @@ pub fn render_settings_html(settings: &Settings, budget: &crate::store::BudgetIn
     )
 }
 
-/// Unified request handler for Cloud Frugality endpoints.
+/// Unified request handler for Cloud Frugality endpoints with default host.
 pub fn handle_request(
     method: &str,
     path: &str,
     body: &str,
     content_type: &str,
+    store: &FrugalityStore,
+) -> HttpResponse {
+    handle_request_with_host(method, path, body, content_type, "", store)
+}
+
+/// Unified request handler for Cloud Frugality endpoints with explicit host resolution.
+pub fn handle_request_with_host(
+    method: &str,
+    path: &str,
+    body: &str,
+    content_type: &str,
+    host: &str,
     store: &FrugalityStore,
 ) -> HttpResponse {
     let mut tracker = LatencyTracker::new();
@@ -891,6 +946,6 @@ pub fn handle_request(
     }
 
     // 5. Dashboard HTML root
-    let html = render_dashboard_html(&data, &tracker);
+    let html = render_dashboard_html(&data, &tracker, host);
     HttpResponse::html(200, html)
 }

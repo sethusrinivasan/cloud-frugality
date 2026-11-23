@@ -186,3 +186,63 @@ def test_engine_toggle_and_rust_switch():
     assert data_rust["engine"] == "rust"
     assert "rust" in data_rust["runtime"]
     assert data_rust["comm"] == "cloud-frugality"
+
+
+def test_engine_switch_urls_local_vs_remote():
+    # 1. Local environment (no AWS env vars, host localhost)
+    orig_fn = os.environ.pop("AWS_LAMBDA_FUNCTION_NAME", None)
+    orig_exec = os.environ.pop("AWS_EXECUTION_ENV", None)
+    orig_py_url = os.environ.pop("PYTHON_WEB_URL", None)
+    orig_rust_url = os.environ.pop("RUST_WEB_URL", None)
+
+    try:
+        urls_local = web.get_engine_switch_urls("localhost:8090")
+        assert urls_local["python"] == "http://localhost:8090/"
+        assert urls_local["rust"] == "http://localhost:8091/"
+
+        # 2. Remote host with no env vars -> defaults to relative queries, zero localhost leakage
+        urls_remote_default = web.get_engine_switch_urls("onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws")
+        assert urls_remote_default["python"] == "/?engine=python"
+        assert urls_remote_default["rust"] == "/?engine=rust"
+        assert "localhost" not in urls_remote_default["python"]
+        assert "localhost" not in urls_remote_default["rust"]
+
+        # 3. Remote host with configured peer Function URLs
+        os.environ["PYTHON_WEB_URL"] = "https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/"
+        os.environ["RUST_WEB_URL"] = "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/"
+
+        urls_remote_configured = web.get_engine_switch_urls("onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws")
+        assert urls_remote_configured["python"] == "https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/"
+        assert urls_remote_configured["rust"] == "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/"
+        assert "localhost" not in urls_remote_configured["python"]
+        assert "localhost" not in urls_remote_configured["rust"]
+
+        # 4. Invariant: Even if an env var mistakenly points to localhost, remote resolution blocks it
+        os.environ["PYTHON_WEB_URL"] = "http://localhost:8090/"
+        os.environ["RUST_WEB_URL"] = "http://127.0.0.1:8091/"
+        urls_sanitized = web.get_engine_switch_urls("onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws")
+        assert urls_sanitized["python"] == "/?engine=python"
+        assert urls_sanitized["rust"] == "/?engine=rust"
+        assert "localhost" not in urls_sanitized["python"]
+        assert "127.0.0.1" not in urls_sanitized["rust"]
+
+        # 5. Full lambda_handler invocation with remote Host header
+        os.environ["PYTHON_WEB_URL"] = "https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/"
+        os.environ["RUST_WEB_URL"] = "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/"
+        res_remote = web.lambda_handler({
+            "rawPath": "/",
+            "httpMethod": "GET",
+            "headers": {"host": "onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws"}
+        }, None)
+        assert res_remote["statusCode"] == 200
+        html = res_remote["body"]
+        assert "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/" in html
+        assert "http://localhost" not in html
+        assert "127.0.0.1" not in html
+    finally:
+        if orig_fn: os.environ["AWS_LAMBDA_FUNCTION_NAME"] = orig_fn
+        if orig_exec: os.environ["AWS_EXECUTION_ENV"] = orig_exec
+        if orig_py_url: os.environ["PYTHON_WEB_URL"] = orig_py_url
+        else: os.environ.pop("PYTHON_WEB_URL", None)
+        if orig_rust_url: os.environ["RUST_WEB_URL"] = orig_rust_url
+        else: os.environ.pop("RUST_WEB_URL", None)

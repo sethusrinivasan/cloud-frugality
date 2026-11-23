@@ -15,7 +15,7 @@ use std::process;
 
 use cloud_frugality::collector::seed_sample_data_if_empty;
 use cloud_frugality::store::FrugalityStore;
-use cloud_frugality::web::handle_request;
+use cloud_frugality::web::handle_request_with_host;
 
 fn main() {
     let store = FrugalityStore::new(None);
@@ -42,6 +42,7 @@ fn main() {
             let mut path = "/".to_string();
             let mut body = String::new();
             let mut content_type = String::new();
+            let mut host = String::new();
 
             let mut i = 2;
             while i < args.len() {
@@ -62,13 +63,17 @@ fn main() {
                         content_type = args[i + 1].clone();
                         i += 2;
                     }
+                    "--host" if i + 1 < args.len() => {
+                        host = args[i + 1].clone();
+                        i += 2;
+                    }
                     _ => {
                         i += 1;
                     }
                 }
             }
 
-            let resp = handle_request(&method, &path, &body, &content_type, &store);
+            let resp = handle_request_with_host(&method, &path, &body, &content_type, &host, &store);
             let headers_map: HashMap<String, String> = resp.headers.into_iter().collect();
             let out_json = serde_json::json!({
                 "statusCode": resp.status_code,
@@ -153,12 +158,15 @@ fn handle_client(mut stream: TcpStream, store: &FrugalityStore) {
     // Extract path without query parameters
     let path = full_path.split('?').next().unwrap_or("/");
 
-    // Extract Content-Type and Body
+    // Extract Content-Type, Host, and Body
     let mut content_type = String::new();
+    let mut host = String::new();
     for line in request_str.lines() {
         let low = line.to_lowercase();
         if low.starts_with("content-type:") {
             content_type = line.split(':').nth(1).unwrap_or("").trim().to_string();
+        } else if low.starts_with("host:") {
+            host = line.split(':').nth(1).unwrap_or("").trim().to_string();
         }
     }
 
@@ -168,7 +176,7 @@ fn handle_client(mut stream: TcpStream, store: &FrugalityStore) {
         ""
     };
 
-    let response = handle_request(method, path, body, &content_type, store);
+    let response = handle_request_with_host(method, path, body, &content_type, &host, store);
 
     let status_line = match response.status_code {
         200 => "HTTP/1.1 200 OK",
@@ -203,8 +211,8 @@ fn run_lambda_runtime(api: &str, store: &FrugalityStore) {
             }
         };
 
-        let (method, path, body, content_type) = parse_lambda_event(&event_str);
-        let resp = handle_request(&method, &path, &body, &content_type, store);
+        let (method, path, body, content_type, host) = parse_lambda_event(&event_str);
+        let resp = handle_request_with_host(&method, &path, &body, &content_type, &host, store);
 
         let headers_map: HashMap<String, String> = resp.headers.into_iter().collect();
         let lambda_res = serde_json::json!({
@@ -270,10 +278,10 @@ fn post_invocation_response(api: &str, request_id: &str, body: &str) -> Result<(
     Ok(())
 }
 
-fn parse_lambda_event(event_str: &str) -> (String, String, String, String) {
+fn parse_lambda_event(event_str: &str) -> (String, String, String, String, String) {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(event_str) {
         if val.get("source").and_then(|s| s.as_str()) == Some("scheduled") {
-            return ("GET".to_string(), "/healthz".to_string(), String::new(), String::new());
+            return ("GET".to_string(), "/healthz".to_string(), String::new(), String::new(), String::new());
         }
 
         let method = val
@@ -300,14 +308,21 @@ fn parse_lambda_event(event_str: &str) -> (String, String, String, String) {
             .unwrap_or("")
             .to_string();
 
+        let host = val
+            .pointer("/headers/host")
+            .and_then(|v| v.as_str())
+            .or_else(|| val.pointer("/headers/Host").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+
         let body = val
             .get("body")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        (method, path, body, ct)
+        (method, path, body, ct, host)
     } else {
-        ("GET".to_string(), "/".to_string(), String::new(), String::new())
+        ("GET".to_string(), "/".to_string(), String::new(), String::new(), String::new())
     }
 }

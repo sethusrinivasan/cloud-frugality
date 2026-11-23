@@ -50,3 +50,4 @@ server.log
 target/
 bootstrap
 .pytest_cache/
+states/

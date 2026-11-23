@@ -5,7 +5,8 @@ Dedicated serverless AWS cost, promotional credit runway, and active resource tr
 [![AWS Deployment](https://img.shields.io/badge/AWS%20Deployment-Active%20(us--east--2)-success?logo=amazon-aws)](https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/)
 [![Python Lambda URL](https://img.shields.io/badge/Python%20Endpoint-Live%20Lambda%20URL-blue?logo=python)](https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/)
 [![Rust Lambda URL](https://img.shields.io/badge/Rust%20Endpoint-Live%20Lambda%20URL-orange?logo=rust)](https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/)
-[![Automated Verification](https://img.shields.io/badge/CI%2FAudit-100%25%20Passing-3fb950.svg)](#quick-start-root-shell-scripts)
+[![CI / Post-Deploy Audit](https://github.com/sethusrinivasan/cloud-frugality/actions/workflows/ci.yml/badge.svg)](https://github.com/sethusrinivasan/cloud-frugality/actions)
+[![TLA+ Formal Spec](https://img.shields.io/badge/TLA%2B%20Model%20Checked-100%25%20Verified%20(TLC)-blueviolet.svg)](formal_spec/EngineSwitch.tla)
 [![Infrastructure](https://img.shields.io/badge/IaC-Pulumi%20AWS%20(Local%20State)-8a2be2.svg)](#aws-deployment--cloud-refresh)
 [![Log Retention](https://img.shields.io/badge/CloudWatch%20Logs-3--Day%20Expiration-informational)](#key-capabilities)
 [![Regional Breakdown](https://img.shields.io/badge/Cost%20Analytics-Sub--Breakdown%20by%20Region-brightgreen)](#key-capabilities)
@@ -159,6 +160,34 @@ tail -f server.log
 # Refresh and immediately apply pending infrastructure changes
 ./refresh.sh --update
 ```
+
+---
+
+## TLA+ Formal Specification & TLC Model Checking
+
+The dynamic engine switch URL resolution logic between Python (`:8090` / Lambda URL) and Rust (`:8091` / Lambda URL) is formally specified and model-checked using **TLA+** (referencing [Learn TLA+](https://learntla.com/index.html)).
+
+- **Specification**: [`formal_spec/EngineSwitch.tla`](formal_spec/EngineSwitch.tla)
+- **TLC Model Checker Config**: [`formal_spec/EngineSwitch.cfg`](formal_spec/EngineSwitch.cfg)
+- **Verification Script**: [`scripts/verify_tla.sh`](scripts/verify_tla.sh)
+
+### Proved Safety Invariants
+1. **`NoLocalhostOnRemote`**: Under AWS Lambda or any remote cloud reverse-proxy, navigation links NEVER resolve to `localhost` or `127.0.0.1`.
+2. **`ValidRemoteResolution`**: On remote deployments, URLs resolve deterministically either to configured peer Function URLs (`PYTHON_WEB_URL` / `RUST_WEB_URL`) or relative query delegations (`/?engine=python` / `/?engine=rust`).
+3. **`LocalDevDefault`**: Outside AWS Lambda on local workstations, links default to isolated local ports (`:8090` and `:8091`).
+
+```bash
+# Execute TLC Model Checker over all 5,940 states (108 distinct states, 0 errors)
+./scripts/verify_tla.sh
+```
+
+---
+
+## GitHub Actions CI/CD & 30-Minute Post-Deployment Audit
+
+The CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) automates continuous verification:
+1. **Job 1 (`test-and-verify`)**: Compiles Rust with `cargo test`, executes Python `pytest`, verifies the TLA+ formal specification with TLC, and immediately audits both live AWS endpoints.
+2. **Job 2 (`post-deployment-liveliness-30m`)**: Executes upon deployment to `master`, enters a **30-minute burn-in window** (`sleep 1800`), and executes an automated liveliness check against both AWS Lambda Function URLs to detect cold-start degradation, S3 state drift, or endpoint regressions.
 
 ---
 

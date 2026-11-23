@@ -71,7 +71,9 @@ def test_live_web_dashboard():
     assert "Breakdown by AWS Region (30-day roll-up, gross)" in body, "Dashboard must show AWS Region breakdown"
     assert "Trend (30d)" in body, "Dashboard must contain 30d trend column"
     assert "Daily Cost History (Last 30 Days)" in body, "Dashboard must contain daily cost table"
-    print("[AUDIT] PASS: Live HTML dashboard is genuine and contains all required sections.")
+    assert "http://localhost" not in body, "Live AWS endpoint must NEVER contain http://localhost"
+    assert "127.0.0.1" not in body, "Live AWS endpoint must NEVER contain 127.0.0.1"
+    print("[AUDIT] PASS: Live HTML dashboard is genuine, contains all required sections, and has ZERO localhost leakage.")
 
 
 def test_live_json_api():

@@ -105,11 +105,52 @@ def _get_service_icon_svg(service_name: str, acronym: str = "") -> str:
     return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"/><path d="M12 12v9"/><path d="m8 17 4 4 4-4"/></svg>'
 
 
-def _render_dashboard_html(data: dict, tracker: LatencyTracker) -> str:
+def get_engine_switch_urls(current_host: str = "") -> dict[str, str]:
+    """
+    Dynamically resolves navigation URLs for the Python and Rust engine switcher.
+    Guarantees that on live AWS or remote deployments, the switcher NEVER links to localhost.
+    """
+    python_env_url = (os.environ.get("PYTHON_WEB_URL") or "").strip()
+    rust_env_url = (os.environ.get("RUST_WEB_URL") or "").strip()
+
+    is_aws = bool(
+        os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        or os.environ.get("AWS_EXECUTION_ENV")
+        or os.environ.get("LAMBDA_TASK_ROOT")
+    )
+
+    clean_host = (current_host or "").split(":")[0].strip().lower()
+    is_localhost = clean_host in ("localhost", "127.0.0.1", "")
+
+    # Local development: strictly when running locally outside AWS Lambda
+    if is_localhost and not is_aws:
+        return {
+            "python": python_env_url or "http://localhost:8090/",
+            "rust": rust_env_url or "http://localhost:8091/",
+        }
+
+    # Remote / AWS Deployment:
+    resolved_python = python_env_url if python_env_url else "/?engine=python"
+    resolved_rust = rust_env_url if rust_env_url else "/?engine=rust"
+
+    # Invariant: Never leak localhost to remote browsers
+    if "localhost" in resolved_python or "127.0.0.1" in resolved_python:
+        resolved_python = "/?engine=python"
+    if "localhost" in resolved_rust or "127.0.0.1" in resolved_rust:
+        resolved_rust = "/?engine=rust"
+
+    return {
+        "python": resolved_python,
+        "rust": resolved_rust,
+    }
+
+
+def _render_dashboard_html(data: dict, tracker: LatencyTracker, host: str = "") -> str:
     summary = tracker.summary()
     daily_baseline = float(data.get("daily_baseline_usd", 1.00))
     budget = data.get("budget", {})
     source_info = get_backing_source_info(data.get("partition"))
+    engine_urls = get_engine_switch_urls(host)
 
     # 1. Sparkline for overall 30d gross
     daily_chron = list(reversed(data["daily"]))
@@ -364,11 +405,11 @@ def _render_dashboard_html(data: dict, tracker: LatencyTracker) -> str:
     <!-- Real Engine Switcher & Backing Source Indicators -->
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <div class="engine-switcher">
-        <a href="http://localhost:8090/" class="engine-btn active" title="Currently Running on Python Server (Port 8090)">
-          <span>🐍 Python (:8090)</span>
+        <a href="{engine_urls['python']}" class="engine-btn active" title="Currently Running on Python Server">
+          <span>🐍 Python</span>
         </a>
-        <a href="http://localhost:8091/" class="engine-btn" title="Switch to Rust Server on Port 8091">
-          <span>🦀 Rust (:8091)</span>
+        <a href="{engine_urls['rust']}" class="engine-btn" title="Switch to Rust Server">
+          <span>🦀 Rust</span>
         </a>
       </div>
 
@@ -937,7 +978,9 @@ def lambda_handler(event: dict, context: Any) -> dict:
         }
 
     # 5. Main Dashboard HTML
-    html = _render_dashboard_html(data, tracker)
+    headers = event.get("headers") or {}
+    host = headers.get("host") or headers.get("Host") or ""
+    html = _render_dashboard_html(data, tracker, host=host)
     return {
         "statusCode": 200,
         "headers": {
