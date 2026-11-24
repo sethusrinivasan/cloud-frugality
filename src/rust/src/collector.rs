@@ -14,6 +14,13 @@ use crate::store::{DailyCostPayload, FrugalityStore};
 
 /// Seeds realistic 30-day AWS serverless spend data if the store is empty.
 pub fn seed_sample_data_if_empty(store: &FrugalityStore) {
+    let is_aws = std::env::var("AWS_LAMBDA_FUNCTION_NAME").is_ok()
+        || std::env::var("AWS_EXECUTION_ENV").is_ok()
+        || std::env::var("LAMBDA_TASK_ROOT").is_ok();
+    if is_aws {
+        return;
+    }
+
     if !store.list_all_daily_costs().is_empty() {
         return;
     }

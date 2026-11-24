@@ -204,6 +204,7 @@ collector_fn = aws.lambda_.Function(
             "AWS_REGION_NAME": CURRENT_REGION,
             "LOG_LEVEL": "INFO",
             "BURN_WINDOW_DAYS": "7",
+            "HARVEST_WINDOW_DAYS": "30",
             "ASSUMED_CREDIT_GRANT_USD": "200",
         }
     ),
@@ -256,6 +257,25 @@ web_s3_policy = aws.iam.RolePolicy(
     ),
 )
 
+# Web Lambda Permission to invoke Collector on-demand if real data refresh is needed
+web_invoke_collector_policy = aws.iam.RolePolicy(
+    "web-invoke-collector-policy",
+    role=web_role.id,
+    policy=collector_fn.arn.apply(
+        lambda arn: json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "InvokeCollectorOnDemand",
+                    "Effect": "Allow",
+                    "Action": ["lambda:InvokeFunction"],
+                    "Resource": arn,
+                }
+            ],
+        })
+    ),
+)
+
 web_log_group = aws.cloudwatch.LogGroup(
     "web-log-group",
     name="/aws/lambda/cloud-frugality-web",
@@ -302,6 +322,7 @@ web_fn = aws.lambda_.Function(
             "AWS_REGION_NAME": CURRENT_REGION,
             "COST_WINDOW_DAYS": "30",
             "LOG_LEVEL": "INFO",
+            "COLLECTOR_FUNCTION_NAME": collector_fn.name,
             "PYTHON_WEB_URL": PYTHON_ENDPOINT_URL,
             "RUST_WEB_URL": RUST_ENDPOINT_URL,
         }
@@ -321,19 +342,19 @@ web_fn_url = aws.lambda_.FunctionUrl(
     ),
 )
 
-# 5. Daily Schedule via EventBridge Rule & Target
-daily_rule = aws.cloudwatch.EventRule(
-    "daily-collector-schedule",
-    schedule_expression="cron(0 6 * * ? *)",
-    description="Triggers daily Cloud Frugality collector run at 06:00 UTC",
+# 5. Recurring Schedule via EventBridge Rule & Targets (Twice Daily)
+harvest_schedule_rule = aws.cloudwatch.EventRule(
+    "twice-daily-collector-schedule",
+    schedule_expression="cron(0 0,12 * * ? *)",
+    description="Triggers Cloud Frugality cost & inventory collector twice daily (00:00 and 12:00 UTC) to harvest real AWS Cost Explorer & Resource data",
     tags=COMMON_TAGS,
 )
 
 daily_target = aws.cloudwatch.EventTarget(
     "daily-collector-target",
-    rule=daily_rule.name,
+    rule=harvest_schedule_rule.name,
     arn=collector_fn.arn,
-    input=json.dumps({"source": "scheduled"}),
+    input=json.dumps({"source": "scheduled", "window_days": 30}),
 )
 
 schedule_permission = aws.lambda_.Permission(
@@ -341,7 +362,7 @@ schedule_permission = aws.lambda_.Permission(
     action="lambda:InvokeFunction",
     function=collector_fn.name,
     principal="events.amazonaws.com",
-    source_arn=daily_rule.arn,
+    source_arn=harvest_schedule_rule.arn,
 )
 
 # 5. Rust Implementation Lambda Functions & Corresponding Resources
@@ -435,12 +456,12 @@ collector_rust_fn = aws.lambda_.Function(
     tags=rust_common_tags,
 )
 
-# Daily Schedule target for Rust Collector
+# Recurring Schedule target for Rust Collector
 daily_target_rust = aws.cloudwatch.EventTarget(
     "daily-collector-rust-target",
-    rule=daily_rule.name,
+    rule=harvest_schedule_rule.name,
     arn=collector_rust_fn.arn,
-    input=json.dumps({"source": "scheduled", "engine": "rust"}),
+    input=json.dumps({"source": "scheduled", "engine": "rust", "window_days": 30}),
 )
 
 schedule_permission_rust = aws.lambda_.Permission(
@@ -448,7 +469,7 @@ schedule_permission_rust = aws.lambda_.Permission(
     action="lambda:InvokeFunction",
     function=collector_rust_fn.name,
     principal="events.amazonaws.com",
-    source_arn=daily_rule.arn,
+    source_arn=harvest_schedule_rule.arn,
 )
 
 # Exports

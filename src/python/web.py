@@ -734,7 +734,35 @@ def _render_settings_html(settings: dict, budget: dict, message: str = "") -> st
 
 
 def _seed_sample_data_if_empty(store: FrugalityStore) -> None:
-    """Seed audited real AWS 30-day usage data if backing store is fresh or using legacy synthetic data."""
+    """
+    Seed audited real AWS 30-day usage data if backing store is fresh.
+    Strictly for local testing / offline development:
+    When running in AWS Lambda, NEVER inject synthetic data into production S3;
+    the dashboard must reflect true reality captured by the recurring collector Lambda.
+    """
+    is_aws = bool(
+        os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        or os.environ.get("AWS_EXECUTION_ENV")
+        or os.environ.get("LAMBDA_TASK_ROOT")
+    )
+    if is_aws:
+        # On AWS deployment: Retarget real data captured by the recurring Lambda.
+        # Do not seed or overwrite with fake/synthetic sample data.
+        existing = store.list_all_daily_costs()
+        if not existing:
+            collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "cloud-frugality-collector")
+            try:
+                lambda_client = boto3.client("lambda", region_name=REGION)
+                log.info("S3 store is empty on AWS. Triggering initial real data harvest via %s...", collector_fn)
+                lambda_client.invoke(
+                    FunctionName=collector_fn,
+                    InvocationType="Event",
+                    Payload=json.dumps({"source": "initial_seed", "window_days": 30}),
+                )
+            except Exception as exc:
+                log.warning("Could not auto-invoke collector Lambda: %s", exc)
+        return
+
     existing = store.list_all_daily_costs()
     has_real_data = False
     if existing:
@@ -929,6 +957,46 @@ def lambda_handler(event: dict, context: Any) -> dict:
             pass
 
     # Bulk Export Endpoints for AI Data Analyst full dataset analysis
+    if raw_path in ("/api/harvest", "/api/refresh") and method in ("GET", "POST"):
+        collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "cloud-frugality-collector")
+        try:
+            lambda_client = boto3.client("lambda", region_name=REGION)
+            res = lambda_client.invoke(
+                FunctionName=collector_fn,
+                InvocationType="RequestResponse",
+                Payload=json.dumps({"source": "api_harvest", "window_days": 30}),
+            )
+            resp_payload = json.loads(res["Payload"].read().decode("utf-8"))
+            return {
+                "statusCode": 200,
+                "headers": {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+                },
+                "body": json.dumps({"status": "harvested", "result": resp_payload}, indent=2),
+            }
+        except Exception as exc:
+            try:
+                import handler
+                result = handler.lambda_handler({"source": "direct_harvest", "window_days": 30}, None)
+                return {
+                    "statusCode": 200,
+                    "headers": {
+                        "Content-Type": "application/json; charset=utf-8",
+                        "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+                    },
+                    "body": json.dumps({"status": "harvested_direct", "result": result}, indent=2),
+                }
+            except Exception as direct_exc:
+                return {
+                    "statusCode": 500,
+                    "headers": {
+                        "Content-Type": "application/json; charset=utf-8",
+                        "Access-Control-Allow-Origin": cors_origin if "alibabacloud.com" in cors_origin else "*",
+                    },
+                    "body": json.dumps({"error": str(exc), "direct_error": str(direct_exc)}, indent=2),
+                }
+
     if raw_path in ("/ai/resource/export", "/api/resource/export"):
         try:
             from duckdb_s3 import get_export_urls

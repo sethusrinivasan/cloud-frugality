@@ -264,6 +264,19 @@ class FrugalityStore:
         sorted_records = [by_date[k] for k in sorted(by_date.keys(), reverse=True)]
         self._write_s3_or_local("daily_costs.json", json.dumps(sorted_records, indent=2))
 
+    def save_all_daily_costs(self, days_data: list[dict]) -> None:
+        """Save a batch of daily cost records to S3 and consolidate."""
+        if not days_data:
+            return
+        all_costs = self.list_all_daily_costs()
+        by_date = {c["date"]: c for c in all_costs}
+        for day in days_data:
+            date_str = day["date"]
+            self._write_s3_or_local(f"daily/{date_str}.json", json.dumps(day, indent=2))
+            by_date[date_str] = day
+        sorted_records = [by_date[k] for k in sorted(by_date.keys(), reverse=True)]
+        self._write_s3_or_local("daily_costs.json", json.dumps(sorted_records, indent=2))
+
     def list_all_daily_costs(self) -> list[dict]:
         raw = self._read_s3_or_local("daily_costs.json")
         if raw:
@@ -444,11 +457,10 @@ class FrugalityStore:
             })
 
         # Fallback for AWS regions if empty
-        if not region_totals and window_gross > 0:
+        if not region_totals:
+            active_reg = REGION or "us-east-2"
             region_totals = {
-                "us-east-2": round(window_gross * 0.70, 2),
-                "us-east-1": round(window_gross * 0.20, 2),
-                "global": round(window_gross * 0.10, 2),
+                active_reg: round(window_gross, 2) if window_gross > 0 else 0.0,
             }
 
         # Build AWS Region Breakdown (30-day roll-up, gross)

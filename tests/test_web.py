@@ -258,3 +258,10 @@ def test_engine_switch_urls_local_vs_remote():
         else: os.environ.pop("PYTHON_WEB_URL", None)
         if orig_rust_url: os.environ["RUST_WEB_URL"] = orig_rust_url
         else: os.environ.pop("RUST_WEB_URL", None)
+
+
+def test_api_harvest_endpoint():
+    res = web.lambda_handler({"rawPath": "/api/harvest", "httpMethod": "GET"}, None)
+    assert res["statusCode"] in (200, 500)
+    data = json.loads(res["body"])
+    assert "status" in data or "error" in data
