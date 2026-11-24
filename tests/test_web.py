@@ -9,10 +9,22 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.abspath(os.path.join(HERE, "..", "src"))
+SRC_PY = os.path.abspath(os.path.join(HERE, "..", "src", "python"))
+sys.path.insert(0, SRC_PY)
 sys.path.insert(0, SRC)
 
+import pytest
 from metrics import LatencyTracker
+from store import FrugalityStore
 import web
+
+
+@pytest.fixture(autouse=True)
+def ensure_store_seeded():
+    """Ensure backing store is seeded with sample data before running any web test."""
+    store = FrugalityStore()
+    web._seed_sample_data_if_empty(store)
+    yield
 
 
 def test_latency_tracker():

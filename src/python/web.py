@@ -748,17 +748,28 @@ def _seed_sample_data_if_empty(store: FrugalityStore) -> None:
     if has_real_data:
         return
 
-    # Load real audited AWS usage data
-    real_data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "real_aws_usage.json")
+    # Load real audited AWS usage data across potential deployment & test execution paths
+    here_real = os.path.dirname(os.path.realpath(__file__))
+    here_abs = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here_real, "real_aws_usage.json"),
+        os.path.join(here_abs, "real_aws_usage.json"),
+        os.path.join(here_abs, "python", "real_aws_usage.json"),
+        os.path.abspath(os.path.join(here_abs, "..", "src", "python", "real_aws_usage.json")),
+        os.path.abspath(os.path.join(here_abs, "..", "data", "real_aws_usage_snapshot.json")),
+        "/home/home/github/sql-frontier-eval/data/real_aws_usage_snapshot.json",
+    ]
     real_data = None
-    if os.path.exists(real_data_path):
-        with open(real_data_path) as f:
-            real_data = json.load(f)
-    else:
-        snap_path = "/home/home/github/sql-frontier-eval/data/real_aws_usage_snapshot.json"
-        if os.path.exists(snap_path):
-            with open(snap_path) as f:
-                real_data = json.load(f)
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    if d and "daily" in d and len(d["daily"]) > 0:
+                        real_data = d
+                        break
+            except Exception:
+                continue
 
     if real_data and "daily" in real_data:
         credit_info = real_data.get("credit", {})
