@@ -265,3 +265,29 @@ def test_api_harvest_endpoint():
     assert res["statusCode"] in (200, 500)
     data = json.loads(res["body"])
     assert "status" in data or "error" in data
+
+
+def test_paginated_api_endpoint_python():
+    res = web.lambda_handler({
+        "rawPath": "/ai/resource/paginated",
+        "httpMethod": "GET",
+        "queryStringParameters": {"page": "1", "pageSize": "5", "sort_by": "date"},
+    }, None)
+    assert res["statusCode"] == 200
+    data = json.loads(res["body"])
+    assert data["code"] == 200
+    assert data["data"]["total"] == 1_000_000
+    assert data["data"]["page"] == 1
+    assert data["data"]["pageSize"] == 5
+    assert len(data["data"]["records"]) == 5
+
+
+def test_agent_discovery_endpoint_python():
+    res = web.lambda_handler({"rawPath": "/.well-known/agent-configuration.json", "httpMethod": "GET"}, None)
+    assert res["statusCode"] == 200
+    data = json.loads(res["body"])
+    assert data["name"] == "Cloud Frugality AI Resource Engine"
+    assert "live_endpoints" in data
+    assert "endpoints" in data
+    assert "mcp_server" in data
+

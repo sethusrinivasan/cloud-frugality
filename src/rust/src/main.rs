@@ -15,7 +15,7 @@ use std::process;
 
 use cloud_frugality::collector::seed_sample_data_if_empty;
 use cloud_frugality::store::FrugalityStore;
-use cloud_frugality::web::handle_request_with_host;
+use cloud_frugality::web::handle_request_full;
 
 fn main() {
     let store = FrugalityStore::new(None);
@@ -31,15 +31,19 @@ fn main() {
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("serve");
 
     match command {
+        "mcp" => {
+            cloud_frugality::mcp::run_mcp_stdio_server(&store);
+        }
         "serve" => {
             let port = args.get(2).and_then(|p| p.parse::<u16>().ok()).unwrap_or(8090);
             run_server(port, store);
         }
         "request" => {
             // Invoked by Python or external callers:
-            // cloud-frugality request --method GET --path / [--body "..."] [--content-type "..."]
+            // cloud-frugality request --method GET --path / [--query "..."] [--body "..."] [--content-type "..."]
             let mut method = "GET".to_string();
             let mut path = "/".to_string();
+            let mut query = String::new();
             let mut body = String::new();
             let mut content_type = String::new();
             let mut host = String::new();
@@ -53,6 +57,10 @@ fn main() {
                     }
                     "--path" if i + 1 < args.len() => {
                         path = args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--query" if i + 1 < args.len() => {
+                        query = args[i + 1].clone();
                         i += 2;
                     }
                     "--body" if i + 1 < args.len() => {
@@ -73,12 +81,13 @@ fn main() {
                 }
             }
 
-            let resp = handle_request_with_host(&method, &path, &body, &content_type, &host, &store);
+            let resp = handle_request_full(&method, &path, &query, &body, &content_type, &host, &[], &store);
             let headers_map: HashMap<String, String> = resp.headers.into_iter().collect();
             let out_json = serde_json::json!({
                 "statusCode": resp.status_code,
                 "headers": headers_map,
                 "body": resp.body,
+                "isBase64Encoded": resp.is_base64_encoded,
             });
             println!("{}", serde_json::to_string(&out_json).unwrap());
         }
@@ -155,18 +164,29 @@ fn handle_client(mut stream: TcpStream, store: &FrugalityStore) {
     let method = parts.next().unwrap_or("GET");
     let full_path = parts.next().unwrap_or("/");
 
-    // Extract path without query parameters
-    let path = full_path.split('?').next().unwrap_or("/");
+    let mut path_parts = full_path.splitn(2, '?');
+    let path = path_parts.next().unwrap_or("/");
+    let query_str = path_parts.next().unwrap_or("");
 
-    // Extract Content-Type, Host, and Body
+    // Extract Headers, Content-Type, Host, and Body
     let mut content_type = String::new();
     let mut host = String::new();
-    for line in request_str.lines() {
-        let low = line.to_lowercase();
-        if low.starts_with("content-type:") {
-            content_type = line.split(':').nth(1).unwrap_or("").trim().to_string();
-        } else if low.starts_with("host:") {
-            host = line.split(':').nth(1).unwrap_or("").trim().to_string();
+    let mut headers = Vec::new();
+
+    for line in request_str.lines().skip(1) {
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some(idx) = line.find(':') {
+            let k = line[..idx].trim().to_string();
+            let v = line[idx + 1..].trim().to_string();
+            let k_low = k.to_lowercase();
+            if k_low == "content-type" {
+                content_type = v.clone();
+            } else if k_low == "host" {
+                host = v.clone();
+            }
+            headers.push((k, v));
         }
     }
 
@@ -176,25 +196,33 @@ fn handle_client(mut stream: TcpStream, store: &FrugalityStore) {
         ""
     };
 
-    let response = handle_request_with_host(method, path, body, &content_type, &host, store);
+    let response = handle_request_full(method, path, query_str, body, &content_type, &host, &headers, store);
 
     let status_line = match response.status_code {
         200 => "HTTP/1.1 200 OK",
+        204 => "HTTP/1.1 204 No Content",
         400 => "HTTP/1.1 400 Bad Request",
         404 => "HTTP/1.1 404 Not Found",
         500 => "HTTP/1.1 500 Internal Server Error",
         _ => "HTTP/1.1 200 OK",
     };
 
+    let (body_bytes, body_len) = if let Some(ref raw) = response.raw_bytes {
+        (raw.as_slice(), raw.len())
+    } else {
+        (response.body.as_bytes(), response.body.len())
+    };
+
     let mut header_lines = String::new();
     for (k, v) in &response.headers {
         header_lines.push_str(&format!("{}: {}\r\n", k, v));
     }
-    header_lines.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
+    header_lines.push_str(&format!("Content-Length: {}\r\n", body_len));
     header_lines.push_str("Connection: close\r\n");
 
-    let reply = format!("{}\r\n{}\r\n{}", status_line, header_lines, response.body);
-    let _ = stream.write_all(reply.as_bytes());
+    let header_reply = format!("{}\r\n{}\r\n", status_line, header_lines);
+    let _ = stream.write_all(header_reply.as_bytes());
+    let _ = stream.write_all(body_bytes);
     let _ = stream.flush();
 }
 
@@ -211,14 +239,15 @@ fn run_lambda_runtime(api: &str, store: &FrugalityStore) {
             }
         };
 
-        let (method, path, body, content_type, host) = parse_lambda_event(&event_str);
-        let resp = handle_request_with_host(&method, &path, &body, &content_type, &host, store);
+        let (method, path, query, body, content_type, host, headers) = parse_lambda_event(&event_str);
+        let resp = handle_request_full(&method, &path, &query, &body, &content_type, &host, &headers, store);
 
         let headers_map: HashMap<String, String> = resp.headers.into_iter().collect();
         let lambda_res = serde_json::json!({
             "statusCode": resp.status_code,
             "headers": headers_map,
             "body": resp.body,
+            "isBase64Encoded": resp.is_base64_encoded,
         });
 
         let res_body = serde_json::to_string(&lambda_res).unwrap_or_default();
@@ -278,10 +307,18 @@ fn post_invocation_response(api: &str, request_id: &str, body: &str) -> Result<(
     Ok(())
 }
 
-fn parse_lambda_event(event_str: &str) -> (String, String, String, String, String) {
+fn parse_lambda_event(event_str: &str) -> (String, String, String, String, String, String, Vec<(String, String)>) {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(event_str) {
         if val.get("source").and_then(|s| s.as_str()) == Some("scheduled") {
-            return ("GET".to_string(), "/healthz".to_string(), String::new(), String::new(), String::new());
+            return (
+                "GET".to_string(),
+                "/healthz".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                Vec::new(),
+            );
         }
 
         let method = val
@@ -299,21 +336,43 @@ fn parse_lambda_event(event_str: &str) -> (String, String, String, String, Strin
             .unwrap_or("/")
             .to_string();
 
-        let path = raw_path.split('?').next().unwrap_or("/").to_string();
+        let mut path_parts = raw_path.splitn(2, '?');
+        let path = path_parts.next().unwrap_or("/").to_string();
+        let path_query = path_parts.next().unwrap_or("").to_string();
 
-        let ct = val
-            .pointer("/headers/content-type")
+        let raw_query_string = val
+            .get("rawQueryString")
             .and_then(|v| v.as_str())
-            .or_else(|| val.pointer("/headers/Content-Type").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                if let Some(params) = val.get("queryStringParameters").and_then(|p| p.as_object()) {
+                    params
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or("")))
+                        .collect::<Vec<_>>()
+                        .join("&")
+                } else {
+                    path_query
+                }
+            });
 
-        let host = val
-            .pointer("/headers/host")
-            .and_then(|v| v.as_str())
-            .or_else(|| val.pointer("/headers/Host").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
+        let mut headers = Vec::new();
+        let mut ct = String::new();
+        let mut host = String::new();
+
+        if let Some(hdrs) = val.get("headers").and_then(|h| h.as_object()) {
+            for (k, v) in hdrs {
+                if let Some(s) = v.as_str() {
+                    let k_low = k.to_lowercase();
+                    if k_low == "content-type" {
+                        ct = s.to_string();
+                    } else if k_low == "host" {
+                        host = s.to_string();
+                    }
+                    headers.push((k.clone(), s.to_string()));
+                }
+            }
+        }
 
         let body = val
             .get("body")
@@ -321,8 +380,16 @@ fn parse_lambda_event(event_str: &str) -> (String, String, String, String, Strin
             .unwrap_or("")
             .to_string();
 
-        (method, path, body, ct, host)
+        (method, path, raw_query_string, body, ct, host, headers)
     } else {
-        ("GET".to_string(), "/".to_string(), String::new(), String::new(), String::new())
+        (
+            "GET".to_string(),
+            "/".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+        )
     }
 }

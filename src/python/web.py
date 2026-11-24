@@ -1050,6 +1050,66 @@ def lambda_handler(event: dict, context: Any) -> dict:
             "body": "",
         }
 
+    if raw_path in ("/.well-known/agent-configuration.json", "/api/discovery", "/ai/discovery"):
+        discovery_payload = {
+            "name": "Cloud Frugality AI Resource Engine",
+            "version": "0.1.0",
+            "description": "Serverless AWS spend tracking, promotional credit runway, and 1,000,000 multi-region usage dataset API",
+            "live_endpoints": {
+                "python_engine_url": "https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/",
+                "rust_engine_url": "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/",
+            },
+            "endpoints": {
+                "paginated_api": {
+                    "path": "/ai/resource/paginated",
+                    "method": "GET",
+                    "description": "1,000,000-record dataset with pagination, sorting, and date filtering",
+                    "params": {
+                        "page": "int (default: 1)",
+                        "pageSize": "int (1-10000, default: 1000)",
+                        "sort_by": "string ('date', 'gross_usd', 'region', 'workload_type')",
+                        "sort_order": "string ('asc', 'desc')",
+                        "start_date": "string (YYYY-MM-DD)",
+                        "end_date": "string (YYYY-MM-DD)",
+                        "region": "string (e.g. 'us-east-1')",
+                        "workload_type": "string ('serverless_frugal', 'enterprise_microservices', 'ai_analytics_pipeline', 'global_web_edge')",
+                    },
+                },
+                "legacy_resource_api": {
+                    "path": "/ai/resource",
+                    "method": "GET",
+                    "params": {"resource": "string ('daily' or 'services')"},
+                },
+                "health": {"path": "/healthz", "method": "GET"},
+                "costs": {"path": "/api/costs", "method": "GET"},
+                "settings": {"path": "/api/settings", "method": "GET / POST"},
+            },
+            "mcp_server": {
+                "type": "stdio",
+                "python_command": "python3 src/python/mcp_server.py",
+                "rust_command": "cloud-frugality mcp",
+                "tools": [
+                    "get_health",
+                    "get_cost_summary",
+                    "query_paginated_costs",
+                    "get_settings",
+                    "update_settings",
+                    "get_discovery_info",
+                ],
+            },
+        }
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
+                "Cache-Control": "public, max-age=3600",
+            },
+            "body": json.dumps(discovery_payload, indent=2),
+        }
+
     # Alibaba Cloud Quick BI Data API endpoint
     if raw_path in ("/ai/resource", "/api/resource"):
         data = store.query_cost_summary(window_days=COST_WINDOW_DAYS)

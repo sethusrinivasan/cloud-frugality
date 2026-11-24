@@ -7,8 +7,14 @@
 //! - Inspects `/proc/self/comm` on `/healthz` to verify live runtime identity.
 //! - Provides an interactive engine toggle linking between Python (:8090) and Rust (:8091).
 
+use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::time::Instant;
+
+use base64::prelude::*;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 use crate::metrics::LatencyTracker;
 use crate::store::{CostSummary, FrugalityStore, Settings};
@@ -19,6 +25,8 @@ pub struct HttpResponse {
     pub status_code: u16,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    pub is_base64_encoded: bool,
+    pub raw_bytes: Option<Vec<u8>>,
 }
 
 impl HttpResponse {
@@ -30,6 +38,8 @@ impl HttpResponse {
                 ("Cache-Control".to_string(), "no-store".to_string()),
             ],
             body,
+            is_base64_encoded: false,
+            raw_bytes: None,
         }
     }
 
@@ -37,11 +47,31 @@ impl HttpResponse {
         Self {
             status_code: status,
             headers: vec![
-                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Content-Type".to_string(), "application/json; charset=utf-8".to_string()),
+                ("Access-Control-Allow-Origin".to_string(), "*".to_string()),
+                ("Access-Control-Allow-Methods".to_string(), "GET, POST, OPTIONS, HEAD".to_string()),
+                ("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With, Accept, Origin".to_string()),
                 ("Cache-Control".to_string(), "no-store".to_string()),
             ],
             body,
+            is_base64_encoded: false,
+            raw_bytes: None,
         }
+    }
+
+    pub fn with_gzip(mut self) -> Self {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        if encoder.write_all(self.body.as_bytes()).is_ok() {
+            if let Ok(compressed) = encoder.finish() {
+                self.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
+                self.headers.push(("Content-Encoding".to_string(), "gzip".to_string()));
+                let b64 = BASE64_STANDARD.encode(&compressed);
+                self.raw_bytes = Some(compressed);
+                self.body = b64;
+                self.is_base64_encoded = true;
+            }
+        }
+        self
     }
 }
 
@@ -794,6 +824,28 @@ pub fn render_settings_html(settings: &Settings, budget: &crate::store::BudgetIn
     )
 }
 
+/// Parses URL query parameters into a case-insensitive key-value map.
+pub fn parse_query_string(query: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let clean = query.trim_start_matches('?');
+    if clean.is_empty() {
+        return map;
+    }
+    for pair in clean.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim().to_lowercase();
+        let val = parts.next().unwrap_or("").trim();
+        let decoded = val.replace("%20", " ").replace('+', " ");
+        if !key.is_empty() {
+            map.insert(key, decoded);
+        }
+    }
+    map
+}
+
 /// Unified request handler for Cloud Frugality endpoints with default host.
 pub fn handle_request(
     method: &str,
@@ -802,7 +854,7 @@ pub fn handle_request(
     content_type: &str,
     store: &FrugalityStore,
 ) -> HttpResponse {
-    handle_request_with_host(method, path, body, content_type, "", store)
+    handle_request_full(method, path, "", body, content_type, "", &[], store)
 }
 
 /// Unified request handler for Cloud Frugality endpoints with explicit host resolution.
@@ -812,6 +864,20 @@ pub fn handle_request_with_host(
     body: &str,
     content_type: &str,
     host: &str,
+    store: &FrugalityStore,
+) -> HttpResponse {
+    handle_request_full(method, path, "", body, content_type, host, &[], store)
+}
+
+/// Full request handler supporting query string parameters, custom headers, and gzip compression.
+pub fn handle_request_full(
+    method: &str,
+    path_with_query: &str,
+    explicit_query: &str,
+    body: &str,
+    content_type: &str,
+    host: &str,
+    headers: &[(String, String)],
     store: &FrugalityStore,
 ) -> HttpResponse {
     let mut tracker = LatencyTracker::new();
@@ -829,13 +895,120 @@ pub fn handle_request_with_host(
                 ("Access-Control-Max-Age".to_string(), "86400".to_string()),
             ],
             body: String::new(),
+            is_base64_encoded: false,
+            raw_bytes: None,
         };
     }
 
-    if path == "/ai/resource" || path == "/api/resource" {
+    // Split path from query string
+    let mut parts = path_with_query.splitn(2, '?');
+    let clean_path = parts.next().unwrap_or("/").trim();
+    let url_query = parts.next().unwrap_or("");
+
+    let mut query_params = parse_query_string(url_query);
+    if !explicit_query.is_empty() {
+        for (k, v) in parse_query_string(explicit_query) {
+            query_params.insert(k, v);
+        }
+    }
+
+    // Also extract JSON body parameters if present
+    if content_type.contains("application/json") && !body.trim().is_empty() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(obj) = val.as_object() {
+                for (k, v) in obj {
+                    let k_low = k.to_lowercase();
+                    if let Some(s) = v.as_str() {
+                        query_params.insert(k_low, s.to_string());
+                    } else if let Some(n) = v.as_i64() {
+                        query_params.insert(k_low, n.to_string());
+                    } else if let Some(f) = v.as_f64() {
+                        query_params.insert(k_low, f.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Check client Accept-Encoding
+    let accept_encoding = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
+        .map(|(_, v)| v.to_lowercase())
+        .unwrap_or_default();
+    let client_accepts_gzip = accept_encoding.contains("gzip");
+
+    // Discovery endpoint for AI agents
+    if clean_path == "/.well-known/agent-configuration.json" || clean_path == "/api/discovery" || clean_path == "/ai/discovery" {
+        let payload = serde_json::json!({
+            "name": "Cloud Frugality AI Resource Engine",
+            "version": "0.1.0",
+            "description": "Serverless AWS spend tracking, promotional credit runway, and 1,000,000 multi-region usage dataset API",
+            "live_endpoints": {
+                "python_engine_url": "https://onj5dz36ffvwsx2nhwyrhrufle0zyhha.lambda-url.us-east-2.on.aws/",
+                "rust_engine_url": "https://2to4pjbhoo6rbtmfjxomrokzfq0ylovp.lambda-url.us-east-2.on.aws/"
+            },
+            "endpoints": {
+                "paginated_api": {
+                    "path": "/ai/resource/paginated",
+                    "method": "GET",
+                    "description": "1,000,000-record dataset with pagination, sorting, and date filtering",
+                    "params": {
+                        "page": "int (default: 1)",
+                        "pageSize": "int (1-10000, default: 1000)",
+                        "sort_by": "string ('date', 'gross_usd', 'region', 'workload_type')",
+                        "sort_order": "string ('asc', 'desc')",
+                        "start_date": "string (YYYY-MM-DD)",
+                        "end_date": "string (YYYY-MM-DD)",
+                        "region": "string (e.g. 'us-east-1')",
+                        "workload_type": "string ('serverless_frugal', 'enterprise_microservices', 'ai_analytics_pipeline', 'global_web_edge')"
+                    }
+                },
+                "legacy_resource_api": {
+                    "path": "/ai/resource",
+                    "method": "GET",
+                    "params": {"resource": "string ('daily' or 'services')"}
+                },
+                "health": {"path": "/healthz", "method": "GET"},
+                "costs": {"path": "/api/costs", "method": "GET"},
+                "settings": {"path": "/api/settings", "method": "GET / POST"}
+            },
+            "mcp_server": {
+                "type": "stdio",
+                "python_command": "python3 src/python/mcp_server.py",
+                "rust_command": "cloud-frugality mcp",
+                "tools": [
+                    "get_health",
+                    "get_cost_summary",
+                    "query_paginated_costs",
+                    "get_settings",
+                    "update_settings"
+                ]
+            }
+        });
+        return HttpResponse::json(200, serde_json::to_string_pretty(&payload).unwrap_or_default());
+    }
+
+    // 1. /ai/resource and /api/resource (Alibaba Cloud Quick BI & Databricks legacy endpoint)
+    if clean_path == "/ai/resource" || clean_path == "/api/resource" {
         let summary = store.query_cost_summary(30);
-        let records = serde_json::to_value(&summary.top_services).unwrap_or(serde_json::json!([]));
-        let total = summary.top_services.len();
+        let req_res = query_params
+            .get("resource")
+            .or_else(|| query_params.get("dataset"))
+            .map(|s| s.as_str())
+            .unwrap_or("daily")
+            .to_lowercase();
+
+        let (records_val, total) = if req_res == "services" {
+            let val = serde_json::to_value(&summary.top_services).unwrap_or(serde_json::json!([]));
+            let len = summary.top_services.len();
+            (val, len)
+        } else {
+            let val = serde_json::to_value(&summary.daily).unwrap_or(serde_json::json!([]));
+            let len = summary.daily.len();
+            (val, len)
+        };
+
         let payload = serde_json::json!({
             "code": 200,
             "message": "success",
@@ -843,24 +1016,124 @@ pub fn handle_request_with_host(
                 "total": total,
                 "pageSize": total,
                 "pageNum": 1,
-                "records": records
+                "resource": req_res,
+                "records": records_val
             }
         });
-        return HttpResponse {
-            status_code: 200,
-            headers: vec![
-                ("Content-Type".to_string(), "application/json; charset=utf-8".to_string()),
-                ("Access-Control-Allow-Origin".to_string(), "*".to_string()),
-                ("Access-Control-Allow-Methods".to_string(), "GET, POST, OPTIONS, HEAD".to_string()),
-                ("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With, Accept, Origin".to_string()),
-                ("Cache-Control".to_string(), "no-store".to_string()),
-            ],
-            body: serde_json::to_string_pretty(&payload).unwrap_or_default(),
-        };
+
+        return HttpResponse::json(200, serde_json::to_string_pretty(&payload).unwrap_or_default());
     }
 
-    // 1. /healthz endpoint - runtime integrity check
-    if path == "/healthz" {
+    // 2. /ai/resource/paginated and /api/resource/paginated (1M-record paginated dataset API)
+    if clean_path == "/ai/resource/paginated" || clean_path == "/api/resource/paginated" {
+        let page = query_params
+            .get("page")
+            .or_else(|| query_params.get("pagenum"))
+            .or_else(|| query_params.get("page_num"))
+            .or_else(|| query_params.get("pageno"))
+            .or_else(|| query_params.get("p"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1);
+
+        let mut page_size = query_params
+            .get("pagesize")
+            .or_else(|| query_params.get("page_size"))
+            .or_else(|| query_params.get("size"))
+            .or_else(|| query_params.get("limit"))
+            .or_else(|| query_params.get("count"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(crate::paginator::DEFAULT_PAGE_SIZE);
+
+        if !client_accepts_gzip && page_size > 5000 {
+            page_size = 5000;
+        }
+
+        let sort_by = query_params
+            .get("sort_by")
+            .or_else(|| query_params.get("sortby"))
+            .or_else(|| query_params.get("sort"))
+            .or_else(|| query_params.get("orderby"))
+            .map(|s| s.as_str())
+            .unwrap_or("date");
+
+        let sort_order = query_params
+            .get("sort_order")
+            .or_else(|| query_params.get("sortorder"))
+            .or_else(|| query_params.get("order"))
+            .map(|s| s.as_str())
+            .unwrap_or("desc");
+
+        let start_date = query_params
+            .get("start_date")
+            .or_else(|| query_params.get("startdate"))
+            .or_else(|| query_params.get("date_from"))
+            .or_else(|| query_params.get("from"))
+            .or_else(|| query_params.get("start"))
+            .or_else(|| query_params.get("min_date"))
+            .map(|s| s.split('T').next().unwrap_or(s).trim());
+
+        let end_date = query_params
+            .get("end_date")
+            .or_else(|| query_params.get("enddate"))
+            .or_else(|| query_params.get("date_to"))
+            .or_else(|| query_params.get("to"))
+            .or_else(|| query_params.get("end"))
+            .or_else(|| query_params.get("max_date"))
+            .map(|s| s.split('T').next().unwrap_or(s).trim());
+
+        let region_filter = query_params
+            .get("region")
+            .or_else(|| query_params.get("region_filter"))
+            .or_else(|| query_params.get("aws_region"))
+            .map(|s| s.as_str());
+
+        let workload_filter = query_params
+            .get("workload_type")
+            .or_else(|| query_params.get("workload"))
+            .or_else(|| query_params.get("archetype"))
+            .map(|s| s.as_str());
+
+        match crate::paginator::get_paginated_records(
+            page,
+            page_size,
+            sort_by,
+            sort_order,
+            start_date,
+            end_date,
+            region_filter,
+            workload_filter,
+        ) {
+            Ok(paginated) => {
+                let res_payload = serde_json::json!({
+                    "code": 200,
+                    "message": "success",
+                    "data": paginated
+                });
+
+                let json_str = if paginated.records.len() <= 50 {
+                    serde_json::to_string_pretty(&res_payload).unwrap_or_default()
+                } else {
+                    serde_json::to_string(&res_payload).unwrap_or_default()
+                };
+
+                let resp = HttpResponse::json(200, json_str);
+                if client_accepts_gzip && resp.body.len() > 1024 {
+                    return resp.with_gzip();
+                }
+                return resp;
+            }
+            Err(err_msg) => {
+                let err_payload = serde_json::json!({
+                    "code": 400,
+                    "message": err_msg
+                });
+                return HttpResponse::json(400, serde_json::to_string_pretty(&err_payload).unwrap_or_default());
+            }
+        }
+    }
+
+    // 3. /healthz endpoint - runtime integrity check
+    if clean_path == "/healthz" {
         let source_info = crate::store::get_backing_source_info();
         let health_data = serde_json::json!({
             "status": "healthy",
@@ -881,8 +1154,8 @@ pub fn handle_request_with_host(
         return HttpResponse::json(200, serde_json::to_string_pretty(&health_data).unwrap());
     }
 
-    // 2. Settings management (/settings and /api/settings)
-    if path == "/settings" || path == "/api/settings" {
+    // 4. Settings management (/settings and /api/settings)
+    if clean_path == "/settings" || clean_path == "/api/settings" {
         if method_upper == "POST" {
             let t0 = Instant::now();
             let mut current = store.get_settings();
@@ -910,9 +1183,9 @@ pub fn handle_request_with_host(
                 }
             } else {
                 for pair in body.split('&') {
-                    let mut parts = pair.splitn(2, '=');
-                    let k = parts.next().unwrap_or("").trim();
-                    let v = parts.next().unwrap_or("").trim();
+                    let mut p_parts = pair.splitn(2, '=');
+                    let k = p_parts.next().unwrap_or("").trim();
+                    let v = p_parts.next().unwrap_or("").trim();
                     match k {
                         "daily_baseline_usd" => {
                             if let Ok(n) = v.parse::<f64>() {
@@ -948,7 +1221,7 @@ pub fn handle_request_with_host(
             let saved = store.save_settings(current);
             tracker.record("Frugality Storage Engine", "Save Settings (config.json)", t0.elapsed().as_secs_f64() * 1000.0);
 
-            if path == "/api/settings" {
+            if clean_path == "/api/settings" {
                 let resp = serde_json::json!({
                     "status": "saved",
                     "settings": saved
@@ -963,7 +1236,7 @@ pub fn handle_request_with_host(
 
         // GET request for settings
         let settings = store.get_settings();
-        if path == "/api/settings" {
+        if clean_path == "/api/settings" {
             return HttpResponse::json(200, serde_json::to_string_pretty(&settings).unwrap());
         }
 
@@ -972,22 +1245,35 @@ pub fn handle_request_with_host(
         return HttpResponse::html(200, html);
     }
 
-    // 3. Analytics query execution
-    let t0 = Instant::now();
-    let mut data = store.query_cost_summary(30);
-    tracker.record(
-        "Frugality Analytics Engine",
-        "Query 30-day Spend, Sub-costs & Badges",
-        t0.elapsed().as_secs_f64() * 1000.0,
-    );
-
-    // 4. /api/costs endpoint
-    if path == "/api/costs" {
+    // 5. Analytics query execution (/api/costs)
+    if clean_path == "/api/costs" {
+        let t0 = Instant::now();
+        let mut data = store.query_cost_summary(30);
+        tracker.record(
+            "Frugality Analytics Engine",
+            "Query 30-day Spend, Sub-costs & Badges",
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
         data.latency_breakdown = Some(tracker.summary());
         return HttpResponse::json(200, serde_json::to_string_pretty(&data).unwrap());
     }
 
-    // 5. Dashboard HTML root
+    // 6. Any other unknown /api/* or /ai/* route -> 404 JSON, NOT HTML!
+    if clean_path.starts_with("/api/") || clean_path.starts_with("/ai/") {
+        let err_payload = serde_json::json!({
+            "code": 404,
+            "message": format!("Route not found: {}", clean_path)
+        });
+        return HttpResponse::json(404, serde_json::to_string_pretty(&err_payload).unwrap_or_default());
+    }
+
+    // 7. Dashboard HTML root
+    let data = store.query_cost_summary(30);
+    tracker.record(
+        "Frugality Analytics Engine",
+        "Render Dashboard",
+        0.0,
+    );
     let html = render_dashboard_html(&data, &tracker, host);
     HttpResponse::html(200, html)
 }
